@@ -957,12 +957,12 @@ mod tests {
             .expect("missing distribution point name");
         let uri = match dp_name {
             DistributionPointName::NameRelativeToCrlIssuer => {
-                self::panic!("unexpected relative dp name")
+                panic!("unexpected relative dp name")
             }
             DistributionPointName::FullName(general_names) => {
                 general_names.map(|general_name| match general_name {
                     Ok(GeneralName::UniformResourceIdentifier(uri)) => uri.as_slice_less_safe(),
-                    _ => self::panic!("unexpected general name type"),
+                    _ => panic!("unexpected general name type"),
                 })
             }
         }

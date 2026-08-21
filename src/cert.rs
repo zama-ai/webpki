@@ -494,7 +494,7 @@ mod tests {
         // relative to the CRL issuer.
         let names = match distribution_point_name {
             DistributionPointName::NameRelativeToCrlIssuer => {
-                self::panic!("unexpected name relative to crl issuer")
+                panic!("unexpected name relative to crl issuer")
             }
             DistributionPointName::FullName(names) => names,
         };
@@ -516,7 +516,7 @@ mod tests {
                     "http://s.symcb.com/pca3-g3.crl".as_bytes()
                 );
             }
-            _ => self::panic!("unexpected general name type"),
+            _ => panic!("unexpected general name type"),
         }
     }
 
@@ -717,7 +717,7 @@ mod tests {
                 .expect("missing distribution point name")
             {
                 DistributionPointName::NameRelativeToCrlIssuer => {
-                    self::panic!("unexpected relative name")
+                    panic!("unexpected relative name")
                 }
                 DistributionPointName::FullName(names) => names,
             }
@@ -726,7 +726,7 @@ mod tests {
         fn uri_bytes<'a>(name: &'a GeneralName<'a>) -> &'a [u8] {
             match name {
                 GeneralName::UniformResourceIdentifier(uri) => uri.as_slice_less_safe(),
-                _ => self::panic!("unexpected name type"),
+                _ => panic!("unexpected name type"),
             }
         }
 

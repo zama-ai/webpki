@@ -16,7 +16,141 @@
 use core::time::Duration;
 
 use pki_types::{CertificateDer, ServerName, UnixTime};
+use rcgen::{
+    Certificate, CertificateParams, CertifiedIssuer, CustomExtension, DnType, GeneralSubtree, IsCa,
+    KeyPair, NameConstraints, SanType, date_time_ymd,
+};
 use webpki::{InvalidNameContext, KeyUsage, anchor_from_trusted_cert};
+
+mod common;
+use common::issuer_params;
+
+/// Since we don't have real constraint matching implemented for URI names, fail closed.
+#[test]
+fn uri_san_rejected_against_uri_permitted_subtree() {
+    let ca_key = KeyPair::generate().unwrap();
+    let mut ca_params = issuer_params("issuer.example.com").unwrap();
+    ca_params
+        .custom_extensions
+        .push(uri_permitted_name_constraints(
+            b"https://allowed.example.com",
+        ));
+    let issuer = CertifiedIssuer::self_signed(ca_params, ca_key).expect("failed to generate CA");
+
+    let ee = generate_cert(
+        vec![SanType::URI("https://evil.example.com".try_into().unwrap())],
+        &issuer,
+    );
+    assert_eq!(
+        check_cert(ee.der(), issuer.der(), &[], &[], &[]),
+        Err(webpki::Error::NameConstraintViolation),
+    );
+}
+
+/// Since we don't have real constraint matching implemented for URI names, fail closed.
+#[test]
+fn uri_san_rejected_against_uri_excluded_subtree() {
+    let ca_key = KeyPair::generate().unwrap();
+    let mut ca_params = issuer_params("issuer.example.com").unwrap();
+    ca_params
+        .custom_extensions
+        .push(uri_excluded_name_constraints(b"https://evil.example.com"));
+    let issuer = CertifiedIssuer::self_signed(ca_params, ca_key).expect("failed to generate CA");
+
+    let ee = generate_cert(
+        vec![SanType::URI("https://evil.example.com".try_into().unwrap())],
+        &issuer,
+    );
+    assert_eq!(
+        check_cert(ee.der(), issuer.der(), &[], &[], &[]),
+        Err(webpki::Error::NameConstraintViolation),
+    );
+}
+
+// Hand-encode a NameConstraints extension (OID 2.5.29.30) with a single
+// permittedSubtree containing a URI GeneralName. rcgen's GeneralSubtree enum
+// doesn't expose a URI variant, so we emit the DER directly.
+fn uri_permitted_name_constraints(uri: &[u8]) -> CustomExtension {
+    uri_name_constraints(uri, 0xa0) // permittedSubtrees [0] IMPLICIT
+}
+
+// Hand-encode a NameConstraints extension (OID 2.5.29.30) with a single
+// excludedSubtree containing a URI GeneralName.
+fn uri_excluded_name_constraints(uri: &[u8]) -> CustomExtension {
+    uri_name_constraints(uri, 0xa1) // excludedSubtrees [1] IMPLICIT
+}
+
+fn uri_name_constraints(uri: &[u8], subtrees_tag: u8) -> CustomExtension {
+    assert!(uri.len() < 128);
+    // URI GeneralName: [6] IMPLICIT IA5String
+    let mut uri_gn = vec![0x86, uri.len() as u8];
+    uri_gn.extend_from_slice(uri);
+    // GeneralSubtree SEQUENCE { base GeneralName, ... }
+    let mut subtree = vec![0x30, uri_gn.len() as u8];
+    subtree.extend_from_slice(&uri_gn);
+    // permittedSubtrees [0] or excludedSubtrees [1] IMPLICIT GeneralSubtrees
+    let mut subtrees = vec![subtrees_tag, subtree.len() as u8];
+    subtrees.extend_from_slice(&subtree);
+    // NameConstraints SEQUENCE
+    let mut nc = vec![0x30, subtrees.len() as u8];
+    nc.extend_from_slice(&subtrees);
+
+    let mut ext = CustomExtension::from_oid_content(&[2, 5, 29, 30], nc);
+    ext.set_criticality(true);
+    ext
+}
+
+/// CVE-2025-61727: a wildcard SAN like `*.example.com` can expand to a name (like
+/// `evil.example.com`) that falls inside an excluded subtree such as `evil.example.com`. Such
+/// certificates must be rejected even though the excluded subtree is narrower than the wildcard's
+/// parent label.
+#[test]
+fn wildcard_san_rejected_if_could_match_excluded_subtree() {
+    let issuer = make_issuer(Some(NameConstraints {
+        permitted_subtrees: vec![],
+        excluded_subtrees: vec![GeneralSubtree::DnsName("evil.example.com".to_string())],
+    }));
+    let ee = generate_cert(
+        vec![SanType::DnsName("*.example.com".try_into().unwrap())],
+        &issuer,
+    );
+    assert_eq!(
+        check_cert(
+            ee.der(),
+            issuer.der(),
+            &[],
+            &[],
+            &["DnsName(\"*.example.com\")"]
+        ),
+        Err(webpki::Error::NameConstraintViolation)
+    );
+}
+
+/// When a CA name constraint permits `www.example.com`, leaf certificates with a wildcard SAN of
+/// `*.example.com` should be rejected, because it could match names outside the permitted subtree.
+///
+/// <https://github.com/rustls/webpki/security/advisories/GHSA-xgp8-3hg3-c2mh>
+#[test]
+fn wildcard_san_rejected_if_could_match_name_outside_permitted_subtree() {
+    let issuer = make_issuer(Some(NameConstraints {
+        permitted_subtrees: vec![GeneralSubtree::DnsName("foo.example.com".to_string())],
+        excluded_subtrees: vec![],
+    }));
+    let ee = generate_cert(
+        vec![SanType::DnsName("*.example.com".try_into().unwrap())],
+        &issuer,
+    );
+    assert_eq!(
+        check_cert(
+            ee.der(),
+            issuer.der(),
+            &[],
+            &[],
+            &["DnsName(\"*.example.com\")"]
+        ),
+        Err(webpki::Error::NameConstraintViolation)
+    );
+}
 
 #[track_caller]
 fn check_cert(
@@ -60,6 +194,52 @@ fn check_cert(
 
     Ok(())
 }
+
+fn make_issuer(name_constraints: Option<NameConstraints>) -> CertifiedIssuer<'static, KeyPair> {
+    let ca_key = KeyPair::generate().unwrap();
+    let mut ca_params = issuer_params("issuer.example.com").unwrap();
+    ca_params.name_constraints = name_constraints;
+    CertifiedIssuer::self_signed(ca_params, ca_key).expect("failed to generate CA cert")
+}
+
+fn generate_cert(sans: Vec<SanType>, issuer: &CertifiedIssuer<'_, KeyPair>) -> Certificate {
+    generate_cert_with_names(None, None, sans, issuer)
+}
+
+fn generate_cert_with_names(
+    subject_cn: Option<&str>,
+    subject_email: Option<&str>,
+    sans: Vec<SanType>,
+    issuer: &CertifiedIssuer<'_, KeyPair>,
+) -> Certificate {
+    let (not_before, not_after) = (date_time_ymd(1970, 1, 1), date_time_ymd(2050, 1, 1));
+
+    // Generate end entity certificate
+    let ee_key = KeyPair::generate().unwrap();
+    let mut ee_params = CertificateParams::new([]).expect("failed to create EE params");
+    ee_params.subject_alt_names = sans;
+    if let Some(cn) = subject_cn {
+        ee_params.distinguished_name.push(DnType::CommonName, cn);
+    }
+    if let Some(email) = subject_email {
+        ee_params
+            .distinguished_name
+            .push(DnType::from_oid(OID_EMAIL_ADDRESS), email);
+    }
+    ee_params
+        .distinguished_name
+        .push(DnType::OrganizationName, "test");
+    ee_params.is_ca = IsCa::ExplicitNoCa;
+    ee_params.not_before = not_before;
+    ee_params.not_after = not_after;
+
+    ee_params
+        .signed_by(&ee_key, issuer)
+        .expect("failed to generate EE cert")
+}
+
+// OID for emailAddress in subject DN (pkcs9-emailAddress)
+const OID_EMAIL_ADDRESS: &[u64] = &[1, 2, 840, 113549, 1, 9, 1];
 
 // DO NOT EDIT BELOW: generated by tests/generate.py
 

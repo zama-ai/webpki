@@ -80,7 +80,6 @@ pub static ECDSA_P256K1_SHA256: &dyn SignatureVerificationAlgorithm = &AwsLcRsAl
     public_key_alg_id: alg_id::ECDSA_P256K1,
     signature_alg_id: alg_id::ECDSA_SHA256,
     verification_alg: &signature::ECDSA_P256K1_SHA256_ASN1,
-    in_fips_submission: false,
 };
 
 /// ECDSA signatures using the P-256 curve and SHA-256.

@@ -21,7 +21,7 @@ license = "ISC"
 name = "rustls-webpki"
 readme = "README.md"
 repository = "https://github.com/rustls/webpki"
-version = "0.103.14"
+version = "0.103.16"
 
 include = [
     "Cargo.toml",
@@ -57,7 +57,8 @@ include = [
 ]
 
 [package.metadata.docs.rs]
-all-features = true
+# Build both crypto backends, but not FIPS (which cannot build on docs.rs).
+features = ["aws-lc-rs", "ring"]
 rustdoc-args = ["--cfg", "webpki_docsrs"]
 
 [package.metadata.cargo_check_external_types]
@@ -80,7 +81,7 @@ std = ["alloc", "pki-types/std"]
 
 [dependencies]
 aws-lc-rs = { version = "1.18", optional = true, default-features = false }
-pki-types = { package = "rustls-pki-types", version = "1.13.2", default-features = false }
+pki-types = { package = "rustls-pki-types", version = "1.14", default-features = false }
 ring = { version = "0.17", default-features = false, optional = true }
 untrusted = "0.9"
 
